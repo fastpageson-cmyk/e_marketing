@@ -1,7 +1,8 @@
-"""계란·김치 세부키워드 발굴 (NAVER API HUB 검색어트렌드).
+"""계란·김치 세부키워드 발굴 (NAVER API HUB 검색어트렌드 + 블로그·카페 검색).
 
-  python3 find_keywords.py test      # 키 확인용 1회 호출
+  python3 find_keywords.py test      # 키 확인용 1회씩 호출
   python3 find_keywords.py harvest   # 후보 생성 -> 후보키워드.csv (동료 목록과 겹치는 건 제외)
+  python3 find_keywords.py mine      # 블로그·카페 글에서 후보 추출 -> 후보키워드.csv 에 사용=? 로 추가 (검토 후 Y/N)
   python3 find_keywords.py trend     # 사용=Y 후보의 검색지수 -> 월 조회수 추정 -> 세부키워드_결과.csv
 
 제1원칙: 과금 방지. HUB는 현재 한시 무료(종량제 플랫폼)라서
@@ -17,7 +18,9 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -28,15 +31,18 @@ CANDIDATES = HERE / "후보키워드.csv"
 RESULT = HERE / "세부키워드_결과.csv"
 HOST = "https://naverapihub.apigw.ntruss.com"
 
-KEY_FILES = {"trend": "api_key.env"}
-# 공식 월 한도: 검색어트렌드 50,000 -> 프로젝트 상한은 그 1% 미만
-USAGE_CAP = {"trend": 200}
+KEY_FILES = {"trend": "api_key.env", "search": "api_key.env"}
+# 공식 월 한도: 검색어트렌드 50,000 / 검색 775,000 -> 프로젝트 상한은 그 1% 미만
+USAGE_CAP = {"trend": 200, "search": 300}
 
 PRODUCTS = {
     "계란": {
         # 동료 목록의 실제 월간 조회수를 기준점으로 써서 검색지수를 조회수로 환산
         "anchor": ("동물복지계란", 1320),
         "check": ("반숙계란", 1690),
+        "bases": ["계란", "달걀", "유정란"],
+        "queries": ["계란 추천", "유정란 추천", "계란 구매 후기", "구운계란 후기", "유정란 택배 후기",
+                    "달걀 고르는 법", "훈제란 후기", "계란 선물 후기"],
         "seeds": """유정란 방사유정란 자연방사유정란 동물복지유정란 무항생제유정란 구운계란 맥반석계란
             반숙란 훈제란 감동란 특란 왕란 대란 목초란 초란 오메가3계란 계란선물세트 계란택배 신선란 청란
             백색란 계란10구 계란15구 계란20구 계란60구 산란일계란 당일산란계란 농장직송계란 해썹계란
@@ -56,11 +62,24 @@ PRODUCTS = {
             반숙계란30구 유정란한판 유정란가격 청란가격 초란가격 왕란가격 특란가격 대란가격 계란30구가격
             동물복지계란가격 무항생제계란가격 쌍란가격 맥반석계란가격 구운계란가격 감동란가격 훈제란가격
             반숙란가격 구운란가격 구운계란추천 반숙란추천 유정란추천 계란추천 훈제란추천 감동란추천
-            맥반석계란추천 초란추천 청란추천 청계란30구""".split(),
+            맥반석계란추천 초란추천 청란추천 청계란30구
+            오골계알30구 청계알가격 오골계알가격 왕란15구 특란15구 대란15구 왕란10구 특란10구 중란가격
+            소란30구 구운란15구 구운란10구 감동란10구 감동란60구 반숙란10구 훈제란10구 훈제란15구
+            맥반석구운란 구운계란10구 구운계란15구 반숙훈제계란 촉촉란 반숙구운란 간장계란 마약계란
+            계란장 아기달걀 이유식유정란 임산부계란 헬스계란 단백질달걀 무항생제달걀 동물복지달걀
+            유기농달걀 달걀30구 달걀한판 달걀가격 달걀택배 달걀선물세트 생달걀 구운달걀 맥반석달걀
+            훈제달걀 반숙달걀 삶은달걀 제주유정란 제주계란 강원도유정란 지리산유정란 산청유정란
+            하동유정란 유정란선물 계란명절선물 설선물계란
+            달걀10구 달걀60구 달걀장 간장달걀 마약달걀 달걀장조림 구운달걀30구 삶은달걀30구 구운달걀택배
+            삶은계란가격 백봉오골계알 토종닭계란 토종닭달걀 재래닭계란 시골달걀 무정란 계란등급 1+계란
+            1+등급계란 에어프라이어구운계란""".split(),
     },
     "김치": {
         "anchor": ("포기김치10KG", 2620),
         "check": ("맛김치", 3640),
+        "bases": ["김치", "묵은지", "깍두기", "겉절이", "동치미", "소박이"],
+        "queries": ["김치 추천", "김치 주문 후기", "포기김치 후기", "묵은지 추천", "갓김치 후기",
+                    "총각김치 후기", "김치 택배 후기", "김장김치 주문"],
         "seeds": """포기김치 배추김치 총각김치 열무김치 깍두기 파김치 갓김치 묵은지 백김치 겉절이 동치미
             나박김치 오이소박이 김치10KG 생김치 저염김치 김장김치 김치택배 볶음김치 김치선물세트
             묵은지3년 국내산포기김치 열무물김치 알타리김치 석박지 섞박지 고들빼기김치 부추김치
@@ -85,7 +104,20 @@ PRODUCTS = {
             김치10KG가격 묵은지가격 총각김치가격 갓김치가격 파김치가격 열무김치가격 백김치가격 깍두기가격
             겉절이추천 석박지추천 섞박지추천 나박김치추천 오이소박이추천 볶음김치추천 맛김치추천
             고들빼기김치추천 부추김치추천 오이김치추천 알타리김치추천 김장김치추천 고추김치추천
-            배추물김치추천 돌산갓김치추천""".split(),
+            배추물김치추천 돌산갓김치추천
+            전라도고들빼기김치 순천고들빼기 여수고들빼기김치 여수갓김치 돌산갓김치1KG 돌산파김치 여수파김치
+            해남김장김치 진도김치 강진김치 영광김치 나주김치 남도묵은지 지리산묵은지 순창묵은지
+            강원도열무김치 평창김치 강릉김치 개성김치 이북식김치 황해도김치 충청도석박지 충청도겉절이
+            풋고추김치 고추소박이 오이고추김치 무깍두기 굴깍두기 설렁탕깍두기 국밥깍두기 설렁탕김치
+            설렁탕섞박지 얼갈이겉절이 열무겉절이 쪽파겉절이 돌산갓물김치 청갓김치 실파김치 묵은지1KG
+            1년묵은지 2년묵은지 3년묵은지 김치찜용묵은지 찌개용묵은지 김치찌개용묵은지 볶음용김치
+            동치미국물 동치미무 김장김치가격 김치1KG가격 포기김치10KG가격 유아백김치 저염백김치
+            비건포기김치 오신채없는김치 사찰김치 채식김치
+            고창김치 부안김치 정읍김치 보성김치 장흥김치 완도김치 고흥김치 함평김치 무안김치 강원도겉절이
+            경상도깍두기 경상도묵은지 여수김장김치 여수총각김치 여수묵은지 여수갓김치2KG 여수갓김치3KG
+            여수갓김치5KG 여수갓김치택배 오이겉절이 무겉절이 깻잎겉절이 미나리겉절이 참나물겉절이
+            양배추겉절이 겉절이택배 겉절이주문 무청김치 배추백김치 무백김치 백김치국물 나박물김치 오이물김치
+            오이깍두기 오이부추김치 가지김치 우엉김치 연근김치""".split(),
     },
 }
 
@@ -110,7 +142,9 @@ class Api:
     def __init__(self):
         CACHE.mkdir(exist_ok=True)
         self.usage_path = CACHE / f"usage_{date.today():%Y%m}.json"
-        self.usage = json.loads(self.usage_path.read_text()) if self.usage_path.exists() else {"trend": 0}
+        self.usage = json.loads(self.usage_path.read_text()) if self.usage_path.exists() else {}
+        for k in USAGE_CAP:
+            self.usage.setdefault(k, 0)
         self.headers = {}
 
     def _call(self, kind, url, body=None):
@@ -138,6 +172,10 @@ class Api:
         path.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         time.sleep(0.2)
         return res
+
+    def search(self, source, query, display=100):
+        q = urllib.parse.urlencode({"query": query, "display": display, "start": 1, "sort": "sim"})
+        return self._call("search", f"{HOST}/search/v1/{source}?{q}")
 
     def trend(self, keywords, start, end):
         body = {
@@ -171,6 +209,48 @@ def test():
     s, e = last_12_months()
     r = api.trend(["계란"], e[:8] + "01", e)
     print("trend OK:", [g["title"] for g in r["results"]])
+    r = api.search("blog", "계란", display=1)
+    print("search OK: total =", r["total"])
+    api.report()
+
+
+def extract(texts, bases, min_freq=3):
+    """글 제목·요약에서 '수식어+기본어' 형태를 뽑는다 (예: '동물복지 계란' -> 동물복지계란, '무항생제유정란')."""
+    counts = Counter()
+    for t in texts:
+        toks = re.findall(r"[0-9A-Za-z가-힣]+", re.sub(r"<[^>]+>|&\w+;", " ", t))
+        for i, tok in enumerate(toks):
+            for b in bases:
+                if tok == b and i > 0 and not toks[i - 1].isdigit() and len(toks[i - 1]) <= 6:
+                    counts[toks[i - 1] + b] += 1
+                elif b in tok and tok != b and len(tok) <= len(b) + 6:
+                    counts[tok] += 1
+    return {norm(k): n for k, n in counts.items() if n >= min_freq}
+
+
+def mine():
+    api = Api()
+    excluded = load_excluded()
+    with CANDIDATES.open(encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    fields = list(rows[0]) + (["언급수"] if "언급수" not in rows[0] else [])
+    seen = {(r["상품"], r["키워드"]) for r in rows}
+    added = 0
+    for product, cfg in PRODUCTS.items():
+        texts = []
+        for q in cfg["queries"]:
+            for source in ("blog", "cafearticle"):
+                texts += [it["title"] + " " + it["description"] for it in api.search(source, q)["items"]]
+        for kw, n in sorted(extract(texts, cfg["bases"]).items(), key=lambda x: -x[1]):
+            if (product, kw) in seen or kw in excluded:
+                continue
+            rows.append({"상품": product, "키워드": kw, "동료목록중복": "", "사용": "?", "언급수": n})
+            added += 1
+    with CANDIDATES.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"글에서 새 후보 {added}개 추가 (사용=? -> 검토 후 Y/N) -> {CANDIDATES.name}")
     api.report()
 
 
@@ -236,4 +316,4 @@ def trend():
 
 
 if __name__ == "__main__":
-    {"test": test, "harvest": harvest, "trend": trend}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit(__doc__))()
+    {"test": test, "harvest": harvest, "mine": mine, "trend": trend}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit(__doc__))()
