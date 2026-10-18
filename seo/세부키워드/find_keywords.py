@@ -4,6 +4,7 @@
   python3 find_keywords.py harvest   # 후보 생성 -> 후보키워드.csv (동료 목록과 겹치는 건 제외)
   python3 find_keywords.py mine      # 블로그·카페 글에서 후보 추출 -> 후보키워드.csv 에 사용=? 로 추가 (검토 후 Y/N)
   python3 find_keywords.py volume    # 검색광고 키워드도구로 실측 월 검색수 + 연관키워드 -> 세부키워드_실측.csv, 연관키워드_후보.csv
+  python3 find_keywords.py expand N  # 연관키워드 눈덩이 확장 (키워드도구 최대 N회) -> 세부키워드_최종.csv
   python3 find_keywords.py trend     # 사용=Y 후보의 검색지수 -> 월 조회수 추정 -> 세부키워드_결과.csv
 
 제1원칙: 과금 방지. HUB는 현재 한시 무료(종량제 플랫폼)라서
@@ -36,6 +37,15 @@ HOST = "https://naverapihub.apigw.ntruss.com"
 SEARCHAD_HOST = "https://api.searchad.naver.com"
 VOLUME = HERE / "세부키워드_실측.csv"
 RELATED = HERE / "연관키워드_후보.csv"
+FINAL = HERE / "세부키워드_최종.csv"
+MANUAL_EXCLUDE = HERE / "제외_키워드.csv"  # 브랜드·무관 키워드 (직접 검토해 추가)
+HINTS_USED = CACHE / "searchad_hints.json"
+KIMCHI_TERMS = ("김치", "묵은지", "깍두기", "겉절이", "동치미", "소박이", "섞박지", "석박지")
+EGG_TERMS = ("계란", "달걀", "유정란", "무정란", "구운란", "반숙란", "훈제란", "감동란", "청란", "초란", "왕란", "특란",
+             "대란", "중란", "백색란", "쌍란", "청계알", "오골계알", "난각", "난백", "난황", "흰자", "노른자", "액란")
+NOT_EGG = ("메추리", "명란", "타조", "오리", "거위", "콜덕", "부화", "알바", "알레르기", "알약", "알로에", "알람")
+INFO_TERMS = ("만들기", "만드는", "담그기", "담그는", "레시피", "끓이는", "효능", "칼로리", "보관", "삶는", "삶기",
+              "하는법", "요리", "볶음밥", "찌개", "찜", "조림", "말이", "후라이", "토스트", "샌드위치", "양념", "황금레시피")
 
 KEY_FILES = {"trend": "api_key.env", "search": "api_key.env"}
 # 공식 월 한도: 검색어트렌드 50,000 / 검색 775,000 -> 프로젝트 상한은 그 1% 미만
@@ -286,6 +296,81 @@ def mine():
     api.report()
 
 
+def product_of(kw):
+    if any(t in kw for t in KIMCHI_TERMS):
+        return "김치"
+    if not any(t in kw for t in NOT_EGG) and (any(t in kw for t in EGG_TERMS) or kw.endswith(("란", "알"))):
+        return "계란"
+    return ""
+
+
+def nature(kw):
+    return "정보성" if any(t in kw for t in INFO_TERMS) else "상업성"
+
+
+def cached_pool():
+    pool = {}
+    for path in sorted(CACHE.glob("searchad_*.json")):
+        if path == HINTS_USED:
+            continue
+        for k in json.loads(path.read_text(encoding="utf-8")).get("keywordList", []):
+            pool.setdefault(norm(k["relKeyword"]), k)
+    return pool
+
+
+def expand(max_calls):
+    api = Api()
+    excluded = load_excluded()
+    manual = set()
+    if MANUAL_EXCLUDE.exists():
+        with MANUAL_EXCLUDE.open(encoding="utf-8-sig") as f:
+            manual = {norm(r["키워드"]) for r in csv.DictReader(f)}
+    used = set(json.loads(HINTS_USED.read_text())) if HINTS_USED.exists() else set()
+    pool = cached_pool()
+
+    def total(k):
+        return count(k["monthlyPcQcCnt"]) + count(k["monthlyMobileQcCnt"])
+
+    def picks():
+        out = {"계란": [], "김치": []}
+        for kw, k in pool.items():
+            p = product_of(kw)
+            if p and kw not in excluded and kw not in manual and 300 <= total(k) < 5000:
+                out[p].append(kw)
+        return out
+
+    for _ in range(max_calls):
+        found = picks()
+        # 200개에 덜 찬 상품부터, 아직 힌트로 안 쓴 키워드를 조회수 높은 순으로 5개씩
+        # 힌트는 구간 밖(대표어 등)·동료 목록 키워드도 쓴다 (결과에서만 제외)
+        hints = {p: sorted((kw for kw, k in pool.items() if product_of(kw) == p and kw not in used
+                            and kw not in manual and total(k) >= 100), key=lambda kw: -total(pool[kw]))[:5]
+                 for p in found}
+        todo = [p for p in found if len(found[p]) < 200 and hints[p]]
+        if not todo:
+            break
+        hints = hints[min(todo, key=lambda p: len(found[p]))]
+        used.update(hints)
+        HINTS_USED.write_text(json.dumps(sorted(used), ensure_ascii=False))
+        for k in api.keywordstool(hints)["keywordList"]:
+            pool.setdefault(norm(k["relKeyword"]), k)
+
+    found = picks()
+    rows = []
+    for p, kws in found.items():
+        for kw in kws:
+            k = pool[kw]
+            rows.append({"상품": p, "키워드": kw, "월검색수": total(k), "PC": count(k["monthlyPcQcCnt"]),
+                         "모바일": count(k["monthlyMobileQcCnt"]), "경쟁정도": k["compIdx"], "성격": nature(kw)})
+    rows.sort(key=lambda r: (r["상품"], -r["월검색수"]))
+    with FINAL.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    print({p: len(v) for p, v in found.items()}, "->", FINAL.name)
+    api.report()
+
+
 def count(v):
     # 월 검색수가 10 미만이면 "< 10" 문자열로 온다
     return 5 if isinstance(v, str) else int(v)
@@ -403,4 +488,7 @@ def trend():
 
 
 if __name__ == "__main__":
-    {"test": test, "harvest": harvest, "mine": mine, "volume": volume, "trend": trend}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit(__doc__))()
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "expand":
+        sys.exit(expand(int(sys.argv[2]) if len(sys.argv) > 2 else 0))
+    {"test": test, "harvest": harvest, "mine": mine, "volume": volume, "trend": trend}.get(cmd, lambda: sys.exit(__doc__))()
