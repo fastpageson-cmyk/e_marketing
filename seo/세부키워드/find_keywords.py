@@ -40,6 +40,7 @@ RELATED = HERE / "연관키워드_후보.csv"
 FINAL = HERE / "세부키워드_최종.csv"
 MANUAL_EXCLUDE = HERE / "제외_키워드.csv"  # 브랜드·무관 키워드 (직접 검토해 추가)
 HINTS_USED = CACHE / "searchad_hints.json"
+DETAIL_RANGE = (300, 10000)  # 세부키워드: 월 검색수 300 이상 1만 이하
 KIMCHI_TERMS = ("김치", "묵은지", "깍두기", "겉절이", "동치미", "소박이", "섞박지", "석박지")
 EGG_TERMS = ("계란", "달걀", "유정란", "무정란", "구운란", "반숙란", "훈제란", "감동란", "청란", "초란", "왕란", "특란",
              "대란", "중란", "백색란", "쌍란", "청계알", "오골계알", "난각", "난백", "난황", "흰자", "노른자", "액란")
@@ -335,7 +336,7 @@ def expand(max_calls):
         out = {"계란": [], "김치": []}
         for kw, k in pool.items():
             p = product_of(kw)
-            if p and kw not in excluded and kw not in manual and 300 <= total(k) < 5000:
+            if p and kw not in excluded and kw not in manual and DETAIL_RANGE[0] <= total(k) <= DETAIL_RANGE[1]:
                 out[p].append(kw)
         return out
 
