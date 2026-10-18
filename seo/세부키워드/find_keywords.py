@@ -3,6 +3,7 @@
   python3 find_keywords.py test      # 키 확인용 1회씩 호출
   python3 find_keywords.py harvest   # 후보 생성 -> 후보키워드.csv (동료 목록과 겹치는 건 제외)
   python3 find_keywords.py mine      # 블로그·카페 글에서 후보 추출 -> 후보키워드.csv 에 사용=? 로 추가 (검토 후 Y/N)
+  python3 find_keywords.py volume    # 검색광고 키워드도구로 실측 월 검색수 + 연관키워드 -> 세부키워드_실측.csv, 연관키워드_후보.csv
   python3 find_keywords.py trend     # 사용=Y 후보의 검색지수 -> 월 조회수 추정 -> 세부키워드_결과.csv
 
 제1원칙: 과금 방지. HUB는 현재 한시 무료(종량제 플랫폼)라서
@@ -11,8 +12,10 @@
   - 모든 응답은 cache/ 에 저장해 재실행 시 재호출하지 않는다.
 키는 *.env 에서 읽고 출력하지 않는다.
 """
+import base64
 import csv
 import hashlib
+import hmac
 import json
 import re
 import sys
@@ -30,10 +33,14 @@ EXCLUDE = HERE / "동료_키워드_제외목록.csv"
 CANDIDATES = HERE / "후보키워드.csv"
 RESULT = HERE / "세부키워드_결과.csv"
 HOST = "https://naverapihub.apigw.ntruss.com"
+SEARCHAD_HOST = "https://api.searchad.naver.com"
+VOLUME = HERE / "세부키워드_실측.csv"
+RELATED = HERE / "연관키워드_후보.csv"
 
 KEY_FILES = {"trend": "api_key.env", "search": "api_key.env"}
 # 공식 월 한도: 검색어트렌드 50,000 / 검색 775,000 -> 프로젝트 상한은 그 1% 미만
-USAGE_CAP = {"trend": 200, "search": 300}
+# 검색광고 API는 키워드도구 조회(GET)만 쓴다. 조회는 무료이고, 광고 생성·수정 요청은 코드에 없다.
+USAGE_CAP = {"trend": 200, "search": 300, "searchad": 100}
 
 PRODUCTS = {
     "계란": {
@@ -126,6 +133,23 @@ def norm(s):
     return re.sub(r"\s+", "", s).lower()
 
 
+def load_env(name):
+    env = {}
+    for line in (HERE / name).read_text(encoding="utf-8").splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def searchad_headers(path):
+    env = load_env("searchad_api_key.env")
+    ts = str(int(time.time() * 1000))
+    sig = hmac.new(env["SECRET_KEY"].encode(), f"{ts}.GET.{path}".encode(), hashlib.sha256).digest()
+    return {"X-Timestamp": ts, "X-API-KEY": env["ACCESS_LICENSE"], "X-Customer": env["CUSTOMER_ID"],
+            "X-Signature": base64.b64encode(sig).decode()}
+
+
 def load_headers(kind):
     env = {}
     for line in (HERE / KEY_FILES[kind]).read_text(encoding="utf-8").splitlines():
@@ -154,9 +178,12 @@ class Api:
             return json.loads(path.read_text(encoding="utf-8"))
         if self.usage[kind] >= USAGE_CAP[kind]:
             sys.exit(f"[중단] {kind} 이번 달 프로젝트 상한 {USAGE_CAP[kind]}회 도달. 더 호출하지 않음.")
-        if kind not in self.headers:
-            self.headers[kind] = load_headers(kind)
-        headers = dict(self.headers[kind])
+        if kind == "searchad":
+            headers = searchad_headers(urllib.parse.urlparse(url).path)
+        else:
+            if kind not in self.headers:
+                self.headers[kind] = load_headers(kind)
+            headers = dict(self.headers[kind])
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -176,6 +203,11 @@ class Api:
     def search(self, source, query, display=100):
         q = urllib.parse.urlencode({"query": query, "display": display, "start": 1, "sort": "sim"})
         return self._call("search", f"{HOST}/search/v1/{source}?{q}")
+
+    def keywordstool(self, keywords):
+        # 힌트 키워드는 1회 최대 5개, 공백 없이
+        q = urllib.parse.urlencode({"hintKeywords": ",".join(keywords), "showDetail": 1})
+        return self._call("searchad", f"{SEARCHAD_HOST}/keywordstool?{q}")
 
     def trend(self, keywords, start, end):
         body = {
@@ -254,6 +286,61 @@ def mine():
     api.report()
 
 
+def count(v):
+    # 월 검색수가 10 미만이면 "< 10" 문자열로 온다
+    return 5 if isinstance(v, str) else int(v)
+
+
+def volume():
+    api = Api()
+    excluded = load_excluded()
+    with RESULT.open(encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    targets = [r for r in rows if r["비고"] or 300 <= int(r["추정월조회수(최근월)"]) < 5000]
+    known = {norm(r["키워드"]) for r in rows}
+    stats = {}
+    for i in range(0, len(targets), 5):
+        res = api.keywordstool([r["키워드"] for r in targets[i:i + 5]])
+        for k in res["keywordList"]:
+            stats.setdefault(norm(k["relKeyword"]), k)
+    # 연관키워드 발굴용 대표어 힌트
+    for hints in (["계란"], ["달걀", "유정란", "구운계란", "감동란", "반숙란"], ["김치", "포기김치", "묵은지", "갓김치", "총각김치"]):
+        for k in api.keywordstool(hints)["keywordList"]:
+            stats.setdefault(norm(k["relKeyword"]), k)
+    out = []
+    for r in targets:
+        k = stats.get(norm(r["키워드"]))
+        pc, mo = (count(k["monthlyPcQcCnt"]), count(k["monthlyMobileQcCnt"])) if k else ("", "")
+        real = pc + mo if k else ""
+        est = int(r["추정월조회수(최근월)"])
+        out.append({"상품": r["상품"], "키워드": r["키워드"], "실측PC": pc, "실측모바일": mo, "실측합계": real,
+                    "구분(실측)": grade(real) if k else "", "추정(데이터랩)": est,
+                    "추정오차%": round((est - real) / real * 100) if real else "",
+                    "경쟁정도": k["compIdx"] if k else "", "비고": r["비고"]})
+    with VOLUME.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=list(out[0]))
+        w.writeheader()
+        w.writerows(out)
+    # 연관키워드: 계란·김치 관련이고 300~5,000, 기존 후보·동료 목록과 겹치지 않는 것
+    kimchi = ("김치", "묵은지", "깍두기", "겉절이", "동치미", "소박이", "섞박지", "석박지")
+    rel = []
+    for kw, k in stats.items():
+        total = count(k["monthlyPcQcCnt"]) + count(k["monthlyMobileQcCnt"])
+        if kw in known or kw in excluded or not 300 <= total < 5000:
+            continue
+        product = ("김치" if any(t in kw for t in kimchi)
+                   else "계란" if "계란" in kw or "달걀" in kw or kw.endswith(("란", "알")) else "")
+        if product:
+            rel.append({"상품": product, "키워드": kw, "실측합계": total, "경쟁정도": k["compIdx"]})
+    rel.sort(key=lambda r: (r["상품"], -r["실측합계"]))
+    with RELATED.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["상품", "키워드", "실측합계", "경쟁정도"])
+        w.writeheader()
+        w.writerows(rel)
+    print(f"실측 {sum(1 for o in out if o['실측합계'] != '')}/{len(out)}개 -> {VOLUME.name}, 연관 신규 {len(rel)}개 -> {RELATED.name}")
+    api.report()
+
+
 def harvest():
     excluded = load_excluded()
     rows = []
@@ -316,4 +403,4 @@ def trend():
 
 
 if __name__ == "__main__":
-    {"test": test, "harvest": harvest, "mine": mine, "trend": trend}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit(__doc__))()
+    {"test": test, "harvest": harvest, "mine": mine, "volume": volume, "trend": trend}.get(sys.argv[1] if len(sys.argv) > 1 else "", lambda: sys.exit(__doc__))()
