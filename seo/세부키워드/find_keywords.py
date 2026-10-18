@@ -51,7 +51,7 @@ INFO_TERMS = ("만들기", "만드는", "담그기", "담그는", "레시피", "
 KEY_FILES = {"trend": "api_key.env", "search": "api_key.env"}
 # 공식 월 한도: 검색어트렌드 50,000 / 검색 775,000 -> 프로젝트 상한은 그 1% 미만
 # 검색광고 API는 키워드도구 조회(GET)만 쓴다. 조회는 무료이고, 광고 생성·수정 요청은 코드에 없다.
-USAGE_CAP = {"trend": 200, "search": 300, "searchad": 100}
+USAGE_CAP = {"trend": 200, "search": 300, "searchad": 200}
 
 PRODUCTS = {
     "계란": {
