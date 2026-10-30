@@ -12,6 +12,17 @@ python3 keyword_volume.py --related 연관.csv 포기김치10kg 썰은배추김�
 - 키: 이 폴더에 `searchad_api_key.env`를 둔다. 형식은 `../세부키워드/find_keywords.py`와 같다(`CUSTOMER_ID`, `ACCESS_LICENSE`, `SECRET_KEY`). `*.env`는 `.gitignore`로 막혀 있으니 절대 커밋하지 않는다.
 - 상품 수는 이 스크립트로 받을 수 없다. 아이템스카우트(itemscout.io/keyword)에서 띄어 쓴 키워드로 검색하고, 6~8초 뒤에 읽는다.
 
+## shopping_insight.py: 쇼핑 클릭 추이와 구매층
+
+데이터랩 쇼핑인사이트로 식품 카테고리 안에서 키워드 클릭 추이를 비교하고, 연령·성별 비중을 본다. 검색량이 아니라 실제 쇼핑 클릭 기준이다.
+
+```bash
+python3 shopping_insight.py 배추김치10kg 포기김치10kg 김치10kg
+python3 shopping_insight.py --audience 김치10kg
+```
+
+- 키: 이 폴더에 `shopping_api_key.env`를 둔다. `세부키워드/shopping_api_key.env`와 같은 키다.
+
 ## 쇼핑 검색 API 키 진단 (2026-10-30)
 
 `세부키워드/shopping_api_key.env`로 상품 수를 조회하면 401 오류가 난다.
@@ -21,6 +32,7 @@ python3 keyword_volume.py --related 연관.csv 포기김치10kg 썰은배추김�
 - 네이버 쇼핑 검색 API(`openapi.naver.com/v1/search/shop.json`)는 네이버 개발자센터 키만 받는다. 그래서 HUB 키를 넣으면 401(`NID AUTH Result Invalid`)이 난다.
 - NAVER API HUB 쪽에는 쇼핑 상품 검색 API가 없다. `search/v1/shop`, `search/v1/shopping`, `shopping/v1/search`가 모두 404였다. HUB의 "쇼핑"은 쇼핑인사이트(클릭 트렌드)뿐이다.
 - 같은 키로 `search/v1/blog`를 부르면 "이 Application에서 활성화되지 않은 API"(401)가 나온다. 블로그·카페 검색을 쓰려면 HUB 콘솔에서 해당 API를 켜야 한다.
+- **이 키는 쇼핑인사이트용으로는 정상 동작한다.** `shopping/v1/categories`와 `shopping/v1/category/keywords`가 응답을 준다. 즉 파일 이름의 "shopping"은 상품 검색이 아니라 쇼핑인사이트를 가리킨다. 반대로 `api_key.env`는 쇼핑인사이트가 꺼져 있다(401).
 
 **키를 다시 받아야 하나:** 받아도 쇼핑 검색은 안 된다.
 - 공개 MCP 저장소 isnow890/naver-search-mcp의 README에 따르면, 네이버 개발자센터 키는 2026-07-31부터 새로 발급되지 않는다. 이미 발급된 키는 2027-06-30까지 동작한다.
